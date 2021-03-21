@@ -52,10 +52,15 @@ from subprocess import getoutput
 
 try:
     import dbus
-    from dbus.mainloop.pyqt5 import DBusQtMainLoop
+    from dbus.mainloop.pyqt5 import DBusQtMainLoop as DBusMainLoop
     haveDBus = True
 except:
-    haveDBus = False
+    try:
+        # Try falling back to GMainLoop
+        from dbus.mainloop.glib import DBusGMainLoop as DBusMainLoop
+        haveDBus = True
+    except:
+        haveDBus = False
 
 # ------------------------------------------------------------------------------------------------------------
 # Check for PulseAudio and Wine
@@ -112,8 +117,6 @@ XDG_APPLICATIONS_PATH = [
     "/usr/share/applications",
     "/usr/local/share/applications"
 ]
-
-WINEASIO_PREFIX = "HKEY_CURRENT_USER\Software\Wine\WineASIO"
 
 # ---------------------------------------------------------------------
 
@@ -1063,7 +1066,6 @@ class CadenceMainW(QMainWindow, ui_cadence.Ui_CadenceMainW):
             self.systray.addMenu("a2j", self.tr("ALSA MIDI Bridge"))
             self.systray.addMenuAction("a2j", "a2j_start", self.tr("Start"))
             self.systray.addMenuAction("a2j", "a2j_stop", self.tr("Stop"))
-            self.systray.addMenuAction("a2j", "a2j_export_hw", self.tr("Export Hardware Ports..."))
             self.systray.addMenu("pulse", self.tr("PulseAudio Bridge"))
             self.systray.addMenuAction("pulse", "pulse_start", self.tr("Start"))
             self.systray.addMenuAction("pulse", "pulse_stop", self.tr("Stop"))
@@ -1085,7 +1087,6 @@ class CadenceMainW(QMainWindow, ui_cadence.Ui_CadenceMainW):
             self.systray.connect("alsa_stop", self.slot_AlsaBridgeStop)
             self.systray.connect("a2j_start", self.slot_A2JBridgeStart)
             self.systray.connect("a2j_stop", self.slot_A2JBridgeStop)
-            self.systray.connect("a2j_export_hw", self.slot_A2JBridgeExportHW)
             self.systray.connect("pulse_start", self.slot_PulseAudioBridgeStart)
             self.systray.connect("pulse_stop", self.slot_PulseAudioBridgeStop)
 
@@ -1130,7 +1131,6 @@ class CadenceMainW(QMainWindow, ui_cadence.Ui_CadenceMainW):
 
         self.b_a2j_start.clicked.connect(self.slot_A2JBridgeStart)
         self.b_a2j_stop.clicked.connect(self.slot_A2JBridgeStop)
-        self.b_a2j_export_hw.clicked.connect(self.slot_A2JBridgeExportHW)
         self.b_pulse_start.clicked.connect(self.slot_PulseAudioBridgeStart)
         self.b_pulse_stop.clicked.connect(self.slot_PulseAudioBridgeStop)
         self.tb_pulse_options.clicked.connect(self.slot_PulseAudioBridgeOptions)
@@ -1189,6 +1189,7 @@ class CadenceMainW(QMainWindow, ui_cadence.Ui_CadenceMainW):
         # org.gna.home.a2jmidid.control
         self.DBusA2JBridgeStartedCallback.connect(self.slot_DBusA2JBridgeStartedCallback)
         self.DBusA2JBridgeStoppedCallback.connect(self.slot_DBusA2JBridgeStoppedCallback)
+        self.cb_a2j_autoexport.stateChanged[int].connect(self.slot_A2JBridgeExportHW)
 
         # -------------------------------------------------------------
 
@@ -1310,7 +1311,7 @@ class CadenceMainW(QMainWindow, ui_cadence.Ui_CadenceMainW):
 
     def jackStarted(self):
         self.m_last_dsp_load = gDBus.jack.GetLoad()
-        self.m_last_xruns    = gDBus.jack.GetXruns()
+        self.m_last_xruns    = int(gDBus.jack.GetXruns())
         self.m_last_buffer_size = gDBus.jack.GetBufferSize()
 
         self.b_jack_start.setEnabled(False)
@@ -1342,20 +1343,11 @@ class CadenceMainW(QMainWindow, ui_cadence.Ui_CadenceMainW):
             if GlobalSettings.value("A2J/AutoStart", True, type=bool):
                 if not portsExported and GlobalSettings.value("A2J/AutoExport", True, type=bool):
                     gDBus.a2j.set_hw_export(True)
-                    self.systray.setActionEnabled("a2j_start", False)
                     portsExported = True
                 gDBus.a2j.start()
             else:
                 self.b_a2j_start.setEnabled(True)
-                self.b_a2j_export_hw.setEnabled(True)
                 self.systray.setActionEnabled("a2j_start", True)
-
-            if portsExported:
-                self.b_a2j_export_hw.setText('Ports exported!')
-
-            # It is only needed to export the ports initially, new ones will appear automatically
-            self.b_a2j_export_hw.setEnabled(not portsExported)
-            self.systray.setActionEnabled("a2j_export_hw", not portsExported)
 
         self.checkAlsaAudio()
         self.checkPulseAudio()
@@ -1388,10 +1380,7 @@ class CadenceMainW(QMainWindow, ui_cadence.Ui_CadenceMainW):
 
         if gDBus.a2j:
             self.b_a2j_start.setEnabled(False)
-            self.b_a2j_export_hw.setEnabled(False)
             self.systray.setActionEnabled("a2j_start", False)
-            if bool(gDBus.a2j.get_hw_export()):
-                self.b_a2j_export_hw.setText('Ports exported!')
 
         global jackClientIdALSA, jackClientIdPulse
         jackClientIdALSA  = -1
@@ -1406,17 +1395,17 @@ class CadenceMainW(QMainWindow, ui_cadence.Ui_CadenceMainW):
         self.b_a2j_stop.setEnabled(True)
         self.systray.setActionEnabled("a2j_start", False)
         self.systray.setActionEnabled("a2j_stop", True)
-        self.label_bridge_a2j.setText(self.tr("ALSA MIDI Bridge is running"))
+        if bool(gDBus.a2j.get_hw_export()):
+            self.label_bridge_a2j.setText(self.tr("ALSA MIDI Bridge is running, ports are exported"))
+        else :
+            self.label_bridge_a2j.setText(self.tr("ALSA MIDI Bridge is running"))
 
     def a2jStopped(self):
         jackRunning = bool(gDBus.jack and gDBus.jack.IsStarted())
-        needExport = bool(not gDBus.a2j.get_hw_export() and jackRunning)
         self.b_a2j_start.setEnabled(jackRunning)
         self.b_a2j_stop.setEnabled(False)
         self.systray.setActionEnabled("a2j_start", jackRunning)
         self.systray.setActionEnabled("a2j_stop", False)
-        self.systray.setActionEnabled("a2j_export_hw", needExport)
-        self.b_a2j_export_hw.setEnabled(needExport)
         self.label_bridge_a2j.setText(self.tr("ALSA MIDI Bridge is stopped"))
 
     def checkAlsaAudio(self):
@@ -1532,16 +1521,14 @@ class CadenceMainW(QMainWindow, ui_cadence.Ui_CadenceMainW):
         self.label_app_comment.setText(comment)
 
     def updateSystrayTooltip(self):
-        systrayText  = "Cadence<br/>"
-        systrayText += "<font size=\"-1\">"
-        systrayText += "<b>%s:</b>&nbsp;%s<br/>" % (self.tr("JACK Status"), self.label_jack_status.text())
-        systrayText += "<b>%s:</b>&nbsp;%s<br/>" % (self.tr("Realtime"), self.label_jack_realtime.text())
-        systrayText += "<b>%s:</b>&nbsp;%s<br/>" % (self.tr("DSP Load"), self.label_jack_dsp.text())
-        systrayText += "<b>%s:</b>&nbsp;%s<br/>" % (self.tr("Xruns"), self.label_jack_xruns.text())
-        systrayText += "<b>%s:</b>&nbsp;%s<br/>" % (self.tr("Buffer Size"), self.label_jack_bfsize.text())
-        systrayText += "<b>%s:</b>&nbsp;%s<br/>" % (self.tr("Sample Rate"), self.label_jack_srate.text())
-        systrayText += "<b>%s:</b>&nbsp;%s" % (self.tr("Block Latency"), self.label_jack_latency.text())
-        systrayText += "</font><font size=\"-2\"><br/></font>"
+        systrayText  = "Cadence\n"
+        systrayText += "%s: %s\n" % (self.tr("JACK Status"), self.label_jack_status.text())
+        systrayText += "%s: %s\n" % (self.tr("Realtime"), self.label_jack_realtime.text())
+        systrayText += "%s: %s\n" % (self.tr("DSP Load"), self.label_jack_dsp.text())
+        systrayText += "%s: %s\n" % (self.tr("Xruns"), self.label_jack_xruns.text())
+        systrayText += "%s: %s\n" % (self.tr("Buffer Size"), self.label_jack_bfsize.text())
+        systrayText += "%s: %s\n" % (self.tr("Sample Rate"), self.label_jack_srate.text())
+        systrayText += "%s: %s" % (self.tr("Block Latency"), self.label_jack_latency.text())
 
         self.systray.setToolTip(systrayText)
 
@@ -1667,7 +1654,7 @@ class CadenceMainW(QMainWindow, ui_cadence.Ui_CadenceMainW):
 
     @pyqtSlot()
     def slot_JackServerStop(self):
-        if gDBus.a2j:
+        if gDBus.a2j and bool(gDBus.a2j.is_started()):
             gDBus.a2j.stop()
         try:
             gDBus.jack.StopServer()
@@ -1788,17 +1775,14 @@ class CadenceMainW(QMainWindow, ui_cadence.Ui_CadenceMainW):
     def slot_A2JBridgeStop(self):
         gDBus.a2j.stop()
 
-    @pyqtSlot()
-    def slot_A2JBridgeExportHW(self):
+    @pyqtSlot(int)
+    def slot_A2JBridgeExportHW(self, state):
         a2jWasStarted = bool(gDBus.a2j.is_started())
 
         if a2jWasStarted:
             gDBus.a2j.stop()
 
-        gDBus.a2j.set_hw_export(True)
-        self.b_a2j_export_hw.setText('Ports exported!')
-        self.b_a2j_export_hw.setEnabled(False)
-        self.systray.setActionEnabled("a2j_export_hw", False)
+        gDBus.a2j.set_hw_export(bool(state))
 
         if a2jWasStarted:
             gDBus.a2j.start()
@@ -2324,7 +2308,7 @@ class CadenceMainW(QMainWindow, ui_cadence.Ui_CadenceMainW):
         if event.timerId() == self.m_timer500:
             if gDBus.jack and self.m_last_dsp_load != None:
                 next_dsp_load = gDBus.jack.GetLoad()
-                next_xruns    = gDBus.jack.GetXruns()
+                next_xruns    = int(gDBus.jack.GetXruns())
                 needUpdateTip = False
 
                 if self.m_last_dsp_load != next_dsp_load:
@@ -2380,7 +2364,7 @@ if __name__ == '__main__':
     app.setWindowIcon(QIcon(":/scalable/cadence.svg"))
 
     if haveDBus:
-        gDBus.loop = DBusQtMainLoop(set_as_default=True)
+        gDBus.loop = DBusMainLoop(set_as_default=True)
         gDBus.bus  = dbus.SessionBus(mainloop=gDBus.loop)
 
     initSystemChecks()
